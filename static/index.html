@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>笔记问答</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2328;
+  }
+  header {
+    padding: 12px 20px; background: #fff; border-bottom: 1px solid #e3e6ea;
+    display: flex; align-items: center; gap: 12px;
+  }
+  header h1 { font-size: 17px; margin: 0; }
+  header .spacer { flex: 1; }
+  #status { font-size: 13px; color: #6b7280; }
+  button {
+    padding: 6px 14px; border: 1px solid #d0d4da; background: #fff;
+    border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  button:hover { background: #f0f1f3; }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 20px; max-width: 860px;
+    width: 100%; margin: 0 auto;
+  }
+  .msg { display: flex; margin-bottom: 16px; }
+  .msg.user { justify-content: flex-end; }
+  .bubble {
+    max-width: 78%; padding: 10px 14px; border-radius: 14px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user .bubble { background: #1677ff; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.assistant .bubble { background: #fff; border: 1px solid #e3e6ea; border-bottom-left-radius: 4px; }
+  .meta { font-size: 12px; color: #9aa1a9; margin: 2px 2px 6px; }
+  .meta.intent { color: #6b7280; }
+  .sources { margin-top: 10px; font-size: 13px; }
+  .src {
+    background: #f7f8fa; border: 1px solid #e6e9ed; border-radius: 8px;
+    padding: 8px 10px; margin-bottom: 6px;
+  }
+  .src summary { cursor: pointer; color: #57606a; }
+  .src .sc { color: #9aa1a9; font-size: 12px; }
+  .src .full { color: #333; white-space: pre-wrap; margin-top: 6px; border-top: 1px dashed #e0e3e8; padding-top: 6px; }
+  .clarify { color: #b45309; background: #fff7ed; border: 1px solid #fed7aa; padding: 10px 12px; border-radius: 8px; }
+  footer {
+    padding: 12px 20px; background: #fff; border-top: 1px solid #e3e6ea;
+    display: flex; gap: 10px; align-items: flex-end;
+    max-width: 900px; width: 100%; margin: 0 auto;
+  }
+  textarea {
+    flex: 1; resize: none; height: 46px; padding: 12px 14px; font: inherit;
+    border: 1px solid #d0d4da; border-radius: 10px; outline: none;
+  }
+  textarea:focus { border-color: #1677ff; }
+  #send { height: 46px; padding: 0 22px; background: #1677ff; color: #fff; border: none; }
+  #send:disabled { background: #a8c6f0; cursor: not-allowed; }
+  .err { color: #c62828; }
+  .usage { font-size: 12px; color: #9aa1a9; margin-top: 6px; }
+  #metricsPanel {
+    max-width: 860px; width: 100%; margin: 12px auto 0; background: #fff;
+    border: 1px solid #e3e6ea; border-radius: 10px; padding: 14px 16px; font-size: 13px;
+  }
+  #metricsPanel table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+  #metricsPanel th, #metricsPanel td { text-align: right; padding: 4px 8px; border-bottom: 1px solid #f0f1f3; }
+  #metricsPanel th:first-child, #metricsPanel td:first-child { text-align: left; }
+  #metricsPanel .qps { margin-top: 8px; color: #57606a; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📝 笔记问答</h1>
+  <span id="status"></span>
+  <span class="spacer"></span>
+  <button id="metrics" title="查看延迟与 QPS">指标</button>
+  <button id="clear" title="清空对话与记忆">清空对话</button>
+</header>
+<div id="metricsPanel" hidden></div>
+<main id="chat"></main>
+<footer>
+  <textarea id="q" placeholder="输入问题，Enter 发送，Shift+Enter 换行"></textarea>
+  <button id="send">发送</button>
+</footer>
+
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('q');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+const clearBtn = document.getElementById('clear');
+const metricsBtn = document.getElementById('metrics');
+let busy = false;
+
+// 会话隔离：由服务端下发 HttpOnly Cookie（rag_sid）识别会话，
+// 同源请求会自动带上，前端无需（也无法）读取该 Cookie。
+
+// 鉴权：服务端开启 RAG_AUTH_TOKEN 后，/api/* 返回 401；
+// 首次遇到 401 时弹出输入框让用户粘贴令牌，存 localStorage 并在后续请求带上。
+let authToken = localStorage.getItem('rag_auth_token') || '';
+
+function withAuth(headers) {
+  const h = Object.assign({}, headers || {});
+  if (authToken) h['X-Auth-Token'] = authToken;
+  return h;
+}
+
+async function apiFetch(url, opts = {}) {
+  opts.headers = withAuth(opts.headers || {});
+  let resp = await fetch(url, opts);
+  if (resp.status === 401) {
+    const token = prompt('该服务已开启鉴权，请输入访问令牌（RAG_AUTH_TOKEN）：');
+    if (token && token.trim()) {
+      authToken = token.trim();
+      localStorage.setItem('rag_auth_token', authToken);
+      opts.headers = withAuth(opts.headers || {});
+      resp = await fetch(url, opts);
+    }
+  }
+  return resp;
+}
+
+function addMsg(role) {
+  const row = document.createElement('div');
+  row.className = 'msg ' + role;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  row.appendChild(bubble);
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+  return bubble;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderSources(hits) {
+  const box = document.createElement('div');
+  box.className = 'sources';
+  hits.forEach((h, i) => {
+    const d = document.createElement('details');
+    d.className = 'src';
+    const sc = [];
+    if (h.rerank != null) sc.push('精排 ' + h.rerank.toFixed(3));
+    sc.push('RRF ' + (h.rrf||0).toFixed(3));
+    sc.push('vec ' + (h.vec_sim||0).toFixed(3));
+    sc.push('BM25 ' + (h.bm25||0).toFixed(2));
+    const origins = (h.origins||[]).join(',') || '-';
+    d.innerHTML = '<summary>[' + (i+1) + '] ' + esc(h.file) +
+      ' <span class="sc">' + esc(sc.join(' · ')) + ' · ' + esc(origins) + '</span></summary>' +
+      '<div class="full">' + esc(h.snippet) + '…<br>（' + esc(h.text.length) + ' 字）</div>';
+    box.appendChild(d);
+  });
+  return box;
+}
+
+function setStatus(t) { statusEl.textContent = t; }
+
+async function ask(question) {
+  busy = true; sendBtn.disabled = true;
+  const userBubble = addMsg('user');
+  userBubble.textContent = question;
+  const asBubble = addMsg('assistant');
+  let answerText = '';
+  let sourcesBox = null;
+  let metaBox = document.createElement('div');
+  metaBox.className = 'meta';
+  asBubble.appendChild(metaBox);
+
+  try {
+    const resp = await apiFetch('/api/ask', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question}),
+    });
+    if (!resp.ok || !resp.body) {
+      asBubble.innerHTML = '<span class="err">请求失败：HTTP ' + resp.status + '</span>';
+      return;
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        const line = raw.split('\n').find(l => l.startsWith('data: '));
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+        handleEvent(ev);
+      }
+    }
+  } catch (e) {
+    asBubble.innerHTML = '<span class="err">网络错误：' + esc(e.message) + '</span>';
+  } finally {
+    busy = false; sendBtn.disabled = false;
+    setStatus('');
+    input.focus();
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function handleEvent(ev) {
+    switch (ev.type) {
+      case 'status':
+        setStatus(ev.text);
+        metaBox.textContent = ev.text;
+        break;
+      case 'intent':
+        metaBox.className = 'meta intent';
+        metaBox.textContent = ev.text;
+        break;
+      case 'clarify':
+        const c = document.createElement('div');
+        c.className = 'clarify';
+        c.textContent = '这个问题缺少关键信息，请补充：\n' +
+          (ev.questions||[]).map((q,i) => (i+1) + '. ' + q).join('\n');
+        asBubble.appendChild(c);
+        metaBox.textContent = '';
+        break;
+      case 'sources':
+        sourcesBox = renderSources(ev.hits);
+        break;
+      case 'delta':
+        if (!answerText) { // 首个增量：先挂出处，再写正文
+          if (sourcesBox) asBubble.appendChild(sourcesBox);
+          answerText = document.createElement('span');
+          asBubble.appendChild(answerText);
+        }
+        answerText.textContent += ev.text;
+        chat.scrollTop = chat.scrollHeight;
+        break;
+      case 'usage':
+        const u = document.createElement('div');
+        u.className = 'usage';
+        u.textContent = '本轮累计 tokens：prompt=' + (ev.prompt_tokens||0) +
+          ' completion=' + (ev.completion_tokens||0) + ' total=' + (ev.total_tokens||0);
+        asBubble.appendChild(u);
+        break;
+      case 'error':
+        const e = document.createElement('div');
+        e.className = 'err';
+        e.textContent = ev.text;
+        asBubble.appendChild(e);
+        break;
+    }
+  }
+}
+
+function submit() {
+  const q = input.value.trim();
+  if (!q || busy) return;
+  input.value = '';
+  ask(q);
+}
+
+sendBtn.addEventListener('click', submit);
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+});
+clearBtn.addEventListener('click', async () => {
+  await apiFetch('/api/reset', {method: 'POST'});
+  chat.innerHTML = '';
+  statusEl.textContent = '';
+});
+
+metricsBtn.addEventListener('click', showMetrics);
+async function showMetrics() {
+  const panel = document.getElementById('metricsPanel');
+  if (!panel.hidden) { panel.hidden = true; return; }
+  try {
+    const r = await apiFetch('/api/metrics');
+    if (!r.ok) { console.error('metrics 请求失败：HTTP ' + r.status); return; }
+    const m = await r.json();
+    let html = '<b>性能指标</b>（uptime ' + m.uptime_seconds + 's）';
+    html += '<table><tr><th>阶段</th><th>count</th><th>avg(ms)</th><th>p50</th><th>p90</th><th>p99</th><th>max</th></tr>';
+    for (const name of ['intent_llm', 'retrieval', 'rerank', 'generation', 'e2e']) {
+      const s = m.stages[name];
+      if (!s) continue;
+      html += '<tr><td>' + name + '</td><td>' + s.count + '</td><td>' + s.avg_ms +
+        '</td><td>' + s.p50_ms + '</td><td>' + s.p90_ms + '</td><td>' + s.p99_ms +
+        '</td><td>' + s.max_ms + '</td></tr>';
+    }
+    html += '</table>';
+    const q = m.qps;
+    const winKey = Object.keys(q).find(k => k.startsWith('window_')) || '';
+    html += '<div class="qps">QPS：累计 ' + q.cumulative +
+      (winKey ? ' · ' + winKey + ' ' + q[winKey] : '') +
+      ' · 总请求 ' + q.total_requests + '</div>';
+    const g = m.stages.generation;
+    if (g && g.tokens_per_sec) {
+      html += '<div class="qps">生成吞吐：' + g.tokens_per_sec + ' tokens/s（累计 ' + g.total_tokens + ' tokens）</div>';
+    }
+    panel.innerHTML = html;
+    panel.hidden = false;
+  } catch (e) { console.error(e); }
+}
+</script>
+</body>
+</html>

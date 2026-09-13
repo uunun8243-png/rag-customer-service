@@ -1,0 +1,26 @@
+# 运行时核心
+fastembed
+rank-bm25
+jieba
+numpy
+
+# Web 服务（多 Worker + Redis 会话，见 app.py / deploy/）
+starlette
+uvicorn[standard]
+gunicorn
+redis
+
+# Qdrant 客户端（web 多 Worker 走 Qdrant 服务端；CLI rag_tool.py 走本地模式）
+qdrant-client
+
+# 评估脚本（eval_generation.py 用 httpx）
+httpx
+
+# LLM Provider 工厂配置（llm.py 读 llm_providers.yaml）
+pyyaml
+
+# 可观测性（OpenTelemetry → Collector → OpenObserve）
+opentelemetry-api>=1.25
+opentelemetry-sdk>=1.25
+opentelemetry-exporter-otlp-proto-http>=1.25
+opentelemetry-instrumentation-starlette>=0.46b0

@@ -1,0 +1,35 @@
+# LLM Provider 配置（由 llm.py 的 LLMProvider 工厂读取）
+#
+# 切换 Provider：环境变量 RAG_LLM_PROVIDER=deepseek|dashscope|siliconflow|openai
+# 各字段覆盖优先级（高 → 低）：
+#   base_url : RAG_LLM_BASE_URL > auth.json 的 {provider}.base_url > 此处 base_url
+#   model    : RAG_LLM_MODEL > 此处 model
+#   api_key  : RAG_LLM_API_KEY > {provider}.api_key_env 环境变量 > auth.json 的 {provider}.key
+#
+# 内置默认配置与本文件等价（文件缺失/损坏时自动回退），改动本文件即可插拔 Provider。
+
+providers:
+  deepseek:
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    api_key_env: DEEPSEEK_API_KEY
+    auth_key: deepseek.key
+
+  dashscope:
+    base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+    model: qwen-plus
+    api_key_env: DASHSCOPE_API_KEY
+    auth_key: dashscope.key
+
+  siliconflow:
+    base_url: https://api.siliconflow.cn/v1
+    model: Qwen/Qwen3-8B
+    api_key_env: SILICONFLOW_API_KEY
+    auth_key: siliconflow.key
+
+  openai:
+    # 无固定默认地址：需设置 RAG_LLM_BASE_URL（自建 vLLM / 网关 / Azure 等 OpenAI 兼容端点）
+    base_url: ""
+    model: gpt-4o-mini
+    api_key_env: OPENAI_API_KEY
+    auth_key: openai.key
